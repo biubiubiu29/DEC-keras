@@ -1,5 +1,5 @@
 import numpy as np
-
+import pandas as pd
 
 def extract_vgg16_features(x):
     from keras.preprocessing.image import img_to_array, array_to_img
@@ -179,7 +179,7 @@ def load_reuters(data_path='./data/reuters'):
         print('making reuters idf features')
         make_reuters_data(data_path)
         print(('reutersidf saved to ' + data_path))
-    data = np.load(os.path.join(data_path, 'reutersidf10k.npy')).item()
+    data = np.load(os.path.join(data_path, 'reutersidf10k.npy'),allow_pickle=True).item()
     # has been shuffled
     x = data['data']
     y = data['label']
@@ -307,8 +307,91 @@ def load_stl(data_path='./data/stl'):
     print('features saved to ' + data_path + '/stl_features.npy')
 
     return features, y
+#------------------------------------------------
+def getStopWords(datapath):
+    stopwords = pd.read_csv(datapath, index_col=False, quoting=3, sep="\t", names=['stopword'], encoding='utf-8')
+    stopwords = stopwords["stopword"].values
+    return stopwords
+
+def jieba(string):
+    import jieba
+    seg_list = jieba.lcut(string, cut_all=False)
+    stopwordsFile = r"./data/toutiao/stopwords.txt"
+    stopwords = getStopWords(stopwordsFile)
+    seg_list = filter(lambda x: len(x) > 1, seg_list)
+    seg_list = filter(lambda x: x not in stopwords, seg_list)  # 去掉停用词
+    return list(seg_list)
 
 
+def get_word2vec():
+    data_dir = './data/toutiao/'
+    word2vec_path = 'data/toutiao/sgns.target.word-word.dynwin5.thr10.neg5.dim300.iter5'
+    print("正在加载预训练词向量……")
+    from gensim.models import KeyedVectors
+    wv_from_text = KeyedVectors.load_word2vec_format(word2vec_path, binary=False)
+    if not exit(''):
+        wv_from_text.save(data_dir+"w2v.model")
+    wv_from_text.load(data_dir+"w2v.model")
+    print("预训练词向量加载完毕。")
+    return wv_from_text
+
+def compute(text):
+    if not text or len(text) == 0:
+        return None
+    value = [0] * 300
+    count = 0
+    wv_from_text = get_word2vec()  # 加载预训练词库
+    for i in text:
+        if i in wv_from_text:
+            value = [a + b for a, b in zip(value, wv_from_text[i])]
+            count += 1
+    if count == 0:
+        return None
+    res = [round(k / count, 6) for k in value]
+    return res
+
+def make_toutiao_data(data_dir = './data/toutiao/'):
+
+    data = pd.read_csv('data/toutiao/toutiao_cat_data.txt', sep='_!_',
+                       names=['id', 'cat_index', 'cat', 'sentence', 'key'])
+    data['sentence'] = data['sentence'].apply(jieba)  # 分词
+    data['word2vec'] = data['sentence'].apply(compute)  # 计算句向量
+    data_output = data[['cat_index', 'word2vec']]
+    data_output = data_output.dropna(axis=0, how='any').reset_index()
+    cat_to_cid = {101: 0, 103: 1, 104: 2, 107: 3, 108: 4}
+    data_x = []
+    target = []
+    for i in range(len(data_output)):
+        if int(data_output['cat_index'][i]) in cat_to_cid:
+            data_x.append(data_output['word2vec'][i])
+            target.append(cat_to_cid[data_output['cat_index'][i]])
+    data_x = np.array(data_x)
+    target = np.array(target)
+    np.save(data_dir + 'toutiao_w2v.npy', {'data': data_x, 'label': target})
+
+def load_toutiao(data_path = 'data/toutiao/'):
+    import os
+    if not os.path.exists(os.path.join(data_path, 'toutiao_w2v.npy')):
+        print('making toutiao w2v features')
+        make_toutiao_data(data_path)
+        print(('reutersidf saved to ' + data_path))
+    data = np.load(os.path.join(data_path, 'toutiao_w2v.npy'),allow_pickle=True).item()
+    # has been shuffled
+    x = data['data']
+    y = data['label']
+    x = x[:10000].astype(np.float32)
+    print(x.dtype, x.size)
+    y = y[:10000]
+    print('count(0)=', np.sum(y == 0))
+    print('count(1)=', np.sum(y == 1))
+    print('count(2)=', np.sum(y == 2))
+    print('count(3)=', np.sum(y == 3))
+    print('count(4)=', np.sum(y == 4))
+    x = x.reshape((x.shape[0], -1)).astype('float64')
+    y = y.reshape((y.size,))
+    print(('toutiao samples', x.shape))
+    return x, y
+#---------------------------------------------------------------
 def load_data(dataset_name):
     if dataset_name == 'mnist':
         return load_mnist()
@@ -322,6 +405,11 @@ def load_data(dataset_name):
         return load_reuters()
     elif dataset_name == 'stl':
         return load_stl()
+    elif dataset_name == 'toutiao':
+        return load_toutiao()
     else:
         print('Not defined for loading', dataset_name)
         exit(0)
+
+if __name__=='__main__':
+    load_toutiao(data_path='data/toutiao/')
