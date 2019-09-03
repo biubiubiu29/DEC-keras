@@ -14,7 +14,7 @@ logwriter = csv.DictWriter(logfile, fieldnames=['trials', 'acc', 'nmi', 'ari'])
 logwriter.writeheader()
 
 trials=10
-for db in ['usps', 'reuters10k', 'stl', 'mnist', 'fmnist']:
+for db in ['reuters10k']:#'usps', 'reuters10k', 'stl', 'mnist', 'fmnist'
     logwriter.writerow(dict(trials=db, acc='', nmi='', ari=''))
     save_db_dir = os.path.join(expdir, db)
     if not os.path.exists(save_db_dir):
@@ -25,7 +25,7 @@ for db in ['usps', 'reuters10k', 'stl', 'mnist', 'fmnist']:
 
     x, y = load_data(db)
     n_clusters = len(np.unique(y))
-
+    n_items = len(x)
     init = 'glorot_uniform'
     pretrain_optimizer = 'adam'
     # setting parameters
@@ -62,6 +62,8 @@ for db in ['usps', 'reuters10k', 'stl', 'mnist', 'fmnist']:
             os.mkdir(save_dir)
 
         dec = DEC(dims=[x.shape[-1], 500, 500, 2000, 10], n_clusters=n_clusters, init=init)
+        dec = DEC(dims=[x.shape[-1], 500, 500, 2000, 10], n_clusters=n_clusters, n_items=n_items,
+                  sigma=1.0, init=init, distribution='T')
         dec.pretrain(x=x, y=y, optimizer=pretrain_optimizer,
                      epochs=pretrain_epochs,
                      save_dir=save_dir)
