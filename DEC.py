@@ -75,24 +75,45 @@ class ClusteringLayer(Layer):
         2D tensor with shape: `(n_samples, n_clusters)`.
     """
 
-    def __init__(self, n_clusters, weights=None, alpha=1.0, **kwargs):
+    def __init__(self, n_clusters,  weights=None, alpha=1.0, sigma = 1.0, distribution ='T', **kwargs):
         if 'input_shape' not in kwargs and 'input_dim' in kwargs:
             kwargs['input_shape'] = (kwargs.pop('input_dim'),)
         super(ClusteringLayer, self).__init__(**kwargs)
         self.n_clusters = n_clusters
         self.alpha = alpha
+        self.sigma = sigma
         self.initial_weights = weights
         self.input_spec = InputSpec(ndim=2)
+        self.distribution = distribution
 
     def build(self, input_shape):
         assert len(input_shape) == 2
-        input_dim = input_shape[1]
-        self.input_spec = InputSpec(dtype=K.floatx(), shape=(None, input_dim))
-        self.clusters = self.add_weight((self.n_clusters, input_dim), initializer='glorot_uniform', name='clusters')
+        self.input_dim = input_shape[1]
+        self.input_spec = InputSpec(dtype=K.floatx(), shape=(None, self.input_dim))
+        self.clusters = self.add_weight((self.n_clusters, self.input_dim), initializer='glorot_uniform', name='clusters')
+        #add
+        # self.n_samples=input_shape[0]
         if self.initial_weights is not None:
             self.set_weights(self.initial_weights)
             del self.initial_weights
         self.built = True
+
+    def _cosine(self,x,y):
+        x = (x - K.min(x, axis=0)) / (K.max(x, axis=0) - K.min(x, axis=0))  # 0-1化数据
+        # X = X / K.sum(X, axis=0)
+        # Xc = K.clip(X, K.epsilon(), 1.)
+        # E = X * (K.log(Xc))
+        # E = K.sum(E, axis=0)
+        # E = -1. / K.log(float(self.n_samples)) * E  # K.cast_to_floatx(K.int_shape(inputs)[0])
+        # w = (1. - E) / K.sum(1. - E, axis=0)
+        # x = x/w
+        dot1 = K.dot(x, K.transpose(y))
+        dot2 = K.batch_dot(x, x, axes=[1, 1])
+        dot3 = K.batch_dot(y, y, axes=[1, 1])
+        dot3 = K.transpose(dot3)
+        max_ = K.maximum(K.sqrt(K.dot(dot2, dot3)), K.epsilon())
+
+        return dot1 / max_
 
     def call(self, inputs, **kwargs):
         """ student t-distribution, as same as used in t-SNE algorithm.
@@ -102,10 +123,79 @@ class ClusteringLayer(Layer):
         Return:
             q: student's t-distribution, or soft labels for each sample. shape=(n_samples, n_clusters)
         """
-        q = 1.0 / (1.0 + (K.sum(K.square(K.expand_dims(inputs, axis=1) - self.clusters), axis=2) / self.alpha))
-        q **= (self.alpha + 1.0) / 2.0
-        q = K.transpose(K.transpose(q) / K.sum(q, axis=1))
-        return q
+
+        if self.distribution =='T':
+            q = 1.0 / (1.0 + (K.sum(K.square(K.expand_dims(inputs, axis=1) - self.clusters), axis=2) / self.alpha))
+            q **= (self.alpha + 1.0) / 2.0
+            q = K.transpose(K.transpose(q) / K.sum(q, axis=1))
+            return q
+
+        elif self.distribution =='MA_distance': #马氏距离
+            m = K.mean(inputs, axis=0)
+            m = K.mean(K.square(inputs - m),axis=0) # m为协方差矩阵
+            x = K.square(K.expand_dims(inputs, axis=1) - self.clusters)
+            x = x / m   # 乘以协方差的逆
+            q = 1.0 / (1.0 + (K.sum(x, axis=2) / self.alpha))
+            q **= (self.alpha + 1.0) / 2.0
+            q = K.transpose(K.transpose(q) / K.sum(q, axis=1))
+            print("马氏距离的q：",q)
+            return q
+        elif self.distribution =='EP_distance': #加权欧氏距离
+            K.set_epsilon(1e-05)
+            _epsilon = K.epsilon()
+            zo = (inputs - K.min(inputs, axis=0)) / (K.max(inputs, axis=0) - K.min(inputs, axis=0)) #0-1化数据
+            E = zo / K.sum(zo, axis=0)
+            Ec = K.clip(E, _epsilon, 1.)
+            E = E * (K.log(Ec))
+            E = K.sum(E, axis=0)
+            print(inputs.shape)
+            Ea = 1. / K.log(float(10000)) #K.cast_to_floatx(K.int_shape(inputs)[0])
+            E = -Ea * E
+            w = (1. - E) / K.sum(1. - E, axis=0)  # w为信息熵权重矩阵（1*m）
+            q = K.square(K.expand_dims(inputs, axis=1) - self.clusters)
+            q = q * w  # 乘以权重
+            q = 1.0 / (1.0 + (K.sum(q, axis=2) / self.alpha))
+            q **= (self.alpha + 1.0) / 2.0
+            q = K.transpose(K.transpose(q) / K.sum(q, axis=1))
+            return q
+        elif self.distribution =='MP_distance': #加权马氏距离
+            K.set_epsilon(1e-05)
+            print(inputs.shape,'!!!!!!!!!!!!')
+            m = K.mean(inputs, axis=0)
+            m = K.mean(K.square(inputs - m), axis=0)  # m为协方差矩阵
+            _epsilon = K.epsilon()
+            X = (inputs - K.min(inputs, axis=0)) / (K.max(inputs, axis=0) - K.min(inputs, axis=0)) #0-1化数据
+            X = X / K.sum(X, axis=0)
+            Xc = K.clip(X, _epsilon, 1.)
+            E = X * (K.log(Xc))
+            E = K.sum(E, axis=0)
+            E = -1. / K.log(float(10000)) * E #K.cast_to_floatx(K.int_shape(inputs)[0])
+            w = (1. - E) / K.sum(1. - E, axis=0)  # w为信息熵权重矩阵（1*m）
+            d = K.square(K.expand_dims(inputs, axis=1) - self.clusters)
+            d = K.sum( d/m*w, axis=2)  # 乘以协方差的逆，乘以权重
+            q = 1.0 / (1.0 + (d / self.alpha))
+            q **= (self.alpha + 1.0) / 2.0
+            q = K.transpose(K.transpose(q) / K.sum(q, axis=1))
+            return q
+
+        elif self.distribution == 'Gassian':
+            d = (K.sum(K.square(K.expand_dims(inputs, axis=1) - self.clusters), axis=2))/((2.0)*K.square(self.sigma))
+            d = K.exp(d)
+            q = 1.0 / (1.0 + (d / self.alpha))
+            q **= (self.alpha + 1.0) / 2.0
+            q = K.transpose(K.transpose(q) / K.sum(q, axis=1))
+            return q
+        elif self.distribution == 'cosine':
+            q = self._cosine(inputs,self.clusters)
+            q = 1.0 / (1.0 + (q / self.alpha))
+            q **= (self.alpha + 1.0) / 2.0
+            q = K.transpose(K.transpose(q) / K.sum(q, axis=1))
+            return q
+        else:
+            q = 1.0 / (1.0 + (K.sum(K.square(K.expand_dims(inputs, axis=1) - self.clusters), axis=2) / self.alpha))
+            q **= (self.alpha + 1.0) / 2.0
+            q = K.transpose(K.transpose(q) / K.sum(q, axis=1))
+            return q
 
     def compute_output_shape(self, input_shape):
         assert input_shape and len(input_shape) == 2
@@ -122,7 +212,9 @@ class DEC(object):
                  dims,
                  n_clusters=10,
                  alpha=1.0,
-                 init='glorot_uniform'):
+                 sigma=1.0,
+                 init='glorot_uniform',
+                 distribution='T'):
 
         super(DEC, self).__init__()
 
@@ -135,8 +227,21 @@ class DEC(object):
         self.autoencoder, self.encoder = autoencoder(self.dims, init=init)
 
         # prepare DEC model
-        clustering_layer = ClusteringLayer(self.n_clusters, name='clustering')(self.encoder.output)
+        clustering_layer = ClusteringLayer(self.n_clusters, sigma=sigma ,
+                           distribution = distribution,name='clustering')(self.encoder.output)
         self.model = Model(inputs=self.encoder.input, outputs=clustering_layer)
+
+    def getClusteringCenters(self):
+        h = self.model.get_weights()
+        print('cluster centers:', h[8])
+        return h[8]
+
+    def getEncoderData(self, x):
+        layer_model = Model(inputs=self.model.input,
+                            outputs=self.model.get_layer('encoder_3').output)  # model包含两个层，encoder和clustering
+        output = layer_model.predict(x)
+        print('shape of data:', output.shape)
+        return output
 
     def pretrain(self, x, y=None, optimizer='adam', epochs=200, batch_size=256, save_dir='results/temp'):
         print('...Pretraining...')
@@ -211,7 +316,7 @@ class DEC(object):
         # logging file
         import csv
         logfile = open(save_dir + '/dec_log.csv', 'w')
-        logwriter = csv.DictWriter(logfile, fieldnames=['iter', 'acc', 'nmi', 'ari', 'loss'])
+        logwriter = csv.DictWriter(logfile, fieldnames=['iter', 'acc', 'nmi', 'ari', 'loss','test_loss'])
         logwriter.writeheader()
 
         loss = 0
@@ -219,9 +324,9 @@ class DEC(object):
         index_array = np.arange(x.shape[0])
         for ite in range(int(maxiter)):
             if ite % update_interval == 0:
-                q = self.model.predict(x, verbose=0)
+                q = self.model.predict(x, batch_size=64,verbose=0)
                 p = self.target_distribution(q)  # update the auxiliary target distribution p
-
+                cost = self.model.evaluate(x, p)
                 # evaluate the clustering performance
                 y_pred = q.argmax(1)
                 if y is not None:
@@ -229,9 +334,9 @@ class DEC(object):
                     nmi = np.round(metrics.nmi(y, y_pred), 5)
                     ari = np.round(metrics.ari(y, y_pred), 5)
                     loss = np.round(loss, 5)
-                    logdict = dict(iter=ite, acc=acc, nmi=nmi, ari=ari, loss=loss)
+                    logdict = dict(iter=ite, acc=acc, nmi=nmi, ari=ari, loss=loss, test_loss=cost)
                     logwriter.writerow(logdict)
-                    print('Iter %d: acc = %.5f, nmi = %.5f, ari = %.5f' % (ite, acc, nmi, ari), ' ; loss=', loss)
+                    print('Iter %d: acc = %.5f, nmi = %.5f, ari = %.5f' % (ite, acc, nmi, ari), ' ; loss=', loss,' ; test_loss=',cost)
 
                 # check stop criterion
                 delta_label = np.sum(y_pred != y_pred_last).astype(np.float32) / y_pred.shape[0]
@@ -270,15 +375,15 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='train',
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--dataset', default='mnist',
+    parser.add_argument('--dataset', default='toutiao',
                         choices=['mnist', 'fmnist', 'usps', 'reuters10k', 'stl'])
     parser.add_argument('--batch_size', default=256, type=int)
     parser.add_argument('--maxiter', default=2e4, type=int)
     parser.add_argument('--pretrain_epochs', default=None, type=int)
     parser.add_argument('--update_interval', default=None, type=int)
     parser.add_argument('--tol', default=0.001, type=float)
-    parser.add_argument('--ae_weights', default=None)
-    parser.add_argument('--save_dir', default='results')
+    parser.add_argument('--ae_weights', default='results/tt+T/ae_weights.h5')#'results/tt+cosine/ae_weights.h5'
+    parser.add_argument('--save_dir', default='results/tt+cosine')
     args = parser.parse_args()
     print(args)
     import os
@@ -289,6 +394,8 @@ if __name__ == "__main__":
     from datasets import load_data
     x, y = load_data(args.dataset)
     n_clusters = len(np.unique(y))
+    sigma = 10.0
+    distribution = 'cosine'#'Gassian','MP_distance''cosine'
 
     init = 'glorot_uniform'
     pretrain_optimizer = 'adam'
@@ -299,7 +406,7 @@ if __name__ == "__main__":
         init = VarianceScaling(scale=1. / 3., mode='fan_in',
                                distribution='uniform')  # [-limit, limit], limit=sqrt(1./fan_in)
         pretrain_optimizer = SGD(lr=1, momentum=0.9)
-    elif args.dataset == 'reuters10k':
+    elif args.dataset == 'reuters10k' or args.dataset == 'toutiao':
         update_interval = 30
         pretrain_epochs = 50
         init = VarianceScaling(scale=1. / 3., mode='fan_in',
@@ -318,7 +425,8 @@ if __name__ == "__main__":
         pretrain_epochs = args.pretrain_epochs
 
     # prepare the DEC model
-    dec = DEC(dims=[x.shape[-1], 500, 500, 2000, 10], n_clusters=n_clusters, init=init)
+    dec = DEC(dims=[x.shape[-1], 500, 500, 2000, 10], n_clusters=n_clusters,
+              sigma = sigma ,init=init,distribution = distribution)
 
     if args.ae_weights is None:
         dec.pretrain(x=x, y=y, optimizer=pretrain_optimizer,
